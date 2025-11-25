@@ -1,0 +1,27 @@
+/* index.css */
+body {
+  background: #0f1724; /* dark bg */
+  color: #e6eef8;
+  font-family: Inter, Roboto, Arial, sans-serif;
+  margin: 0;
+  padding: 0;
+}
+
+/* toast */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: rgba(10, 10, 10, 0.9);
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 8px;
+  z-index: 99999;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+}
+
+/* small responsive tweak */
+@media (max-width: 720px) {
+  .MuiContainer-root { padding: 12px; }
+  .MuiPaper-root { margin: 6px; }
+}

@@ -1,0 +1,8 @@
+# Node modules ignore
+chat-client/node_modules/
+chat-server/node_modules/
+
+# Env files ignore
+/.env
+chat-client/.env
+chat-server/.env
