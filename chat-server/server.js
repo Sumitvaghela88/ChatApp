@@ -3,140 +3,224 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 const Message = require("./models/Message");
+const authRoutes = require("./Routes/authRoutes");
+const userRoutes = require("./Routes/userRotes");
+const uploadRoute = require("./Routes/uploadRoute");
 
 const app = express();
-app.use(cors());
-app.use(express.json());
 
+const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-this";
+
+/* ---------------- MIDDLEWARE ---------------- */
+app.use(
+  cors({
+    origin: "http://localhost:5173", 
+    methods: ["GET", "POST"],
+  })
+);
+app.use(express.json());
 app.use(express.static("public"));
 
-console.log("Loaded MONGODB_URI =", process.env.MONGODB_URI);
+/* ---------------- DB ---------------- */
+mongoose
+  .connect(process.env.MONGODB_URI)
+  .then(() => console.log("MongoDB Connected"))
+  .catch((err) => console.log("DB Error:", err));
 
+/* ---------------- API ROUTES ---------------- */
+app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/upload", uploadRoute);
+
+/* ---------------- SERVER + SOCKET ---------------- */
 const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: "http://localhost:5173",
     methods: ["GET", "POST"],
   },
 });
 
-const PORT = process.env.PORT || 3000;
-const MONGODB_URI = process.env.MONGODB_URI;
+/* ----------- ONLINE USERS TRACKING ----------- */
+const onlineUsers = new Map(); // socketId -> username
+const userSockets = new Map(); // username -> socketId
 
-/* ---------------- MONGO CONNECT ---------------- */
-mongoose
-  .connect(MONGODB_URI)
-  .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.error("MongoDB error:", err));
+/* ----------- SOCKET AUTH MIDDLEWARE ----------- */
+io.use((socket, next) => {
+  const token = socket.handshake.auth.token;
+  const username = socket.handshake.auth.username;
 
-/* ---------------- HELPER ---------------- */
+  // Allow connection without token for testing
+  if (!token && username) {
+    socket.username = username;
+    return next();
+  }
+
+  if (!token) {
+    return next(new Error("Authentication required"));
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    
+    if (username && decoded.username !== username) {
+      return next(new Error("Invalid credentials"));
+    }
+
+    socket.username = decoded.username;
+    socket.userId = decoded.userId;
+    next();
+  } catch (error) {
+    next(new Error("Invalid token"));
+  }
+});
+
+/* ----------- HELPERS ----------- */
 function makeRoom(u1, u2) {
   return [u1, u2].sort().join("_");
 }
 
-/* ---------------- HISTORY ---------------- */
 async function getHistory(room) {
-  try {
-    const msgs = await Message.find({ room })
-      .sort({ ts: -1 })
-      .limit(100)
-      .lean();
-    return msgs.reverse();
-  } catch (err) {
-    return [];
-  }
+  const messages = await Message.find({ room })
+    .sort({ ts: -1 })
+    .limit(100)
+    .lean();
+  return messages.reverse();
 }
 
-/* ---------------- SOCKET.IO ---------------- */
+/* ----------- SOCKET EVENTS ----------- */
 io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
+  console.log(`User connected: ${socket.username} (${socket.id})`);
 
-  /* ---------- TYPING ---------- */
+  // Store user info
+  onlineUsers.set(socket.id, socket.username);
+  userSockets.set(socket.username, socket.id);
+
+  // Broadcast online users to everyone
+  io.emit("online_users", Array.from(onlineUsers.values()));
+
+  /* --- TYPING --- */
   socket.on("typing", ({ from, to }) => {
+    if (!from || !to) return;
     const room = makeRoom(from, to);
     socket.to(room).emit("typing", { from });
   });
 
   socket.on("stop_typing", ({ from, to }) => {
+    if (!from || !to) return;
     const room = makeRoom(from, to);
-    socket.to(room).emit("stop_typing", { from });
+    socket.to(room).emit("stop_typing");
   });
 
-  /* ---------- JOIN PRIVATE ROOM ---------- */
+  /* --- JOIN PRIVATE ROOM --- */
   socket.on("join_private", async ({ from, to }) => {
     if (!from || !to) return;
 
     const room = makeRoom(from, to);
-    socket.data.username = from;
     socket.join(room);
 
-    console.log(`${from} joined room ${room}`);
+    console.log(`${from} joined ${room}`);
 
-    // ⭐ Mark all unread as SEEN
+    // mark seen
     await Message.updateMany(
       { room, seenBy: { $ne: from } },
       { $push: { seenBy: from } }
     );
 
-    // ⭐ Notify the other user → blue ticks
     socket.to(room).emit("seen", { seenBy: from });
 
-    // Send chat history
     const history = await getHistory(room);
     socket.emit("private_history", history);
   });
 
-  /* ---------- SEND PRIVATE MESSAGE ---------- */
-  socket.on("private_message", async ({ from, to, text }) => {
-    if (!from || !to || !text.trim()) return;
+  /* --- SEND MESSAGE (Text or Image) --- */
+  socket.on("private_message", async ({ from, to, text, type, imageUrl }) => {
+    if (!from || !to) return;
+    
+    // Validate message content
+    if (type === "image" && !imageUrl) return;
+    if (type !== "image" && !text?.trim()) return;
 
     const room = makeRoom(from, to);
 
-    const saved = await Message.create({
+    // Create message object
+    const messageData = {
       room,
       username: from,
-      text,
-      ts: new Date(),
+      type: type || "text",
+    };
+
+    if (type === "image") {
+      messageData.imageUrl = imageUrl;
+      messageData.text = text || ""; // Optional caption
+    } else {
+      messageData.text = text;
+    }
+
+    const msg = await Message.create(messageData);
+
+    // Emit to both users in the room
+    io.to(room).emit("private_message", msg);
+
+    // Mark as delivered
+    await Message.findByIdAndUpdate(msg._id, {
+      $addToSet: { deliveredTo: to },
     });
 
-    // Send message to both users
-    io.to(room).emit("private_message", saved);
+    socket.emit("delivered", { messageId: msg._id });
 
-    // ⭐ Update deliveredTo in database
-    await Message.findByIdAndUpdate(saved._id, {
-      $addToSet: { deliveredTo: to }
-    });
-
-    // ⭐ Emit delivered tick ✔✔ white
-    socket.emit("delivered", { messageId: saved._id });
-
-    // ⭐ Send notification to recipient
-    socket.to(room).emit("notification", {
-      username: from,
-      text,
-      ts: Date.now(),
-    });
-
-    console.log(`Message: ${from} -> ${to} = ${text}`);
+    // Send notification
+    const recipientSocketId = userSockets.get(to);
+    if (recipientSocketId) {
+      io.to(recipientSocketId).emit("notification", {
+        username: from,
+        text: type === "image" ? "📷 Sent an image" : text,
+        ts: Date.now(),
+      });
+    }
   });
 
-  /* ---------- DISCONNECT ---------- */
+  /* --- DISCONNECT --- */
   socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
+    console.log(`User disconnected: ${socket.username}`);
+    onlineUsers.delete(socket.id);
+    userSockets.delete(socket.username);
+
+    // Broadcast updated online users
+    io.emit("online_users", Array.from(onlineUsers.values()));
   });
 });
 
-/* ---------------- API: GET HISTORY ---------------- */
-app.get("/history/:u1/:u2", async (req, res) => {
+/* -------- API FOR MANUAL HISTORY (Protected) -------- */
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ error: "No token provided" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    res.status(403).json({ error: "Invalid token" });
+  }
+};
+
+app.get("/history/:u1/:u2", authenticateToken, async (req, res) => {
   const room = makeRoom(req.params.u1, req.params.u2);
-  res.json({
-    ok: true,
-    messages: await getHistory(room),
-  });
+  const messages = await getHistory(room);
+  res.json({ ok: true, messages });
 });
 
-/* ---------------- START SERVER ---------------- */
-server.listen(PORT, () => console.log("Server running on port", PORT));
+/* -------- START SERVER -------- */
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () =>
+  console.log(`Server running → http://localhost:${PORT}`)
+);
