@@ -1,9 +1,10 @@
 // ChatApp.jsx - Liquid Glass Full UI Version
 import React, { useState, useEffect, useRef } from "react";
-import { socket } from "./socket";
+import { socket ,registerSocketHandlers  } from "./socket";
 import AuthForm from "./AuthFrom";
 import ChatBox from "./ChatBox";
 import MessageInput from "./MessageInput";
+
 
 import {
   Box,
@@ -70,63 +71,53 @@ export default function ChatApp() {
     }
   }, []);
 
-  /* ---------------- SOCKET LISTENERS ---------------- */
-  useEffect(() => {
-    if (!user) return;
+useEffect(() => {
+  if (!user) return;
 
-    socket.on("private_history", (msgs) => setMessages(msgs || []));
+  registerSocketHandlers({
+    onPrivateHistory: (msgs) => {
+      setMessages(msgs);
+    },
 
-    socket.on("private_message", (msg) => {
-      setMessages((prev) => {
-        const exists = prev.find((m) => m._id === msg._id);
-        if (exists) {
-          return prev.map((m) => (m._id === msg._id ? msg : m));
-        }
-        return [...prev, msg];
-      });
-    });
+    onPrivateMessage: (msg) => {
+      setMessages((prev) => [...prev, msg]);
+    },
 
-    socket.on("delivered", ({ messageId }) => {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m._id === messageId ? { ...m, delivered: true } : m
-        )
-      );
-    });
+    onDelivered: (data) => {
+      console.log("Delivered:", data);
+    },
 
-    socket.on("seen", () => {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.username === user.username ? { ...m, seen: true } : m
-        )
-      );
-    });
+    onSeen: (data) => {
+      console.log("Seen:", data);
+    },
 
-    socket.on("typing", ({ from }) => setOtherTyping(`${from} is typing...`));
-    socket.on("stop_typing", () => setOtherTyping(""));
+    onTyping: ({ from }) => {
+      setOtherTyping(`${from} is typing...`);
+    },
 
-    socket.on("online_users", (users) => {
+    onStopTyping: () => {
+      setOtherTyping("");
+    },
+
+    onOnlineUsers: (users) => {
       setOnlineUsers(users.filter((u) => u !== user.username));
-    });
+    },
 
-    socket.on("notification", (data) => {
-      if (document.hidden && Notification.permission === "granted") {
-        new Notification(data.username, { body: data.text });
+    onNotification: (data) => {
+      console.log("Notification data:", data); 
+
+      const sender = data.from || data.sender || "Unknown";
+
+      if (Notification.permission === "granted") {
+        new Notification("New Message", {
+          body: `${sender}: ${data.text || ""}`,
+        });
       }
-    });
+    },
+  });
+}, [user]);
 
-    return () => {
-      socket.off("private_history");
-      socket.off("private_message");
-      socket.off("delivered");
-      socket.off("seen");
-      socket.off("typing");
-      socket.off("stop_typing");
-      socket.off("online_users");
-      socket.off("notification");
-    };
-  }, [user]);
-
+  
   /* ---------------- JOIN CHAT ---------------- */
   const joinPrivateChat = (username) => {
     setChatWith(username);

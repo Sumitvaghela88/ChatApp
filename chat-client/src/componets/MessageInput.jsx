@@ -1,4 +1,4 @@
-// MessageInput.jsx — Light Themed Liquid Glass
+
 import React, { useState, useRef } from "react";
 import {
   Stack,

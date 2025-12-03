@@ -5,6 +5,8 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
+const helmet = require("helmet");
+
 const Message = require("./models/Message");
 const authRoutes = require("./Routes/authRoutes");
 const userRoutes = require("./Routes/userRotes");
@@ -16,6 +18,14 @@ const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-this";
 
 /* ---------------- MIDDLEWARE ---------------- */
 app.use(
+  helmet({
+    crossOriginResourcePolicy: false,
+    contentSecurityPolicy: false,
+  })
+);
+
+
+app.use(
   cors({
     origin: "http://localhost:5173", 
     methods: ["GET", "POST"],
@@ -23,6 +33,8 @@ app.use(
 );
 app.use(express.json());
 app.use(express.static("public"));
+
+
 
 /* ---------------- DB ---------------- */
 mongoose
@@ -156,7 +168,7 @@ io.on("connection", (socket) => {
 
     if (type === "image") {
       messageData.imageUrl = imageUrl;
-      messageData.text = text || ""; // Optional caption
+      messageData.text = text || "";  
     } else {
       messageData.text = text;
     }
@@ -176,11 +188,12 @@ io.on("connection", (socket) => {
     // Send notification
     const recipientSocketId = userSockets.get(to);
     if (recipientSocketId) {
-      io.to(recipientSocketId).emit("notification", {
-        username: from,
-        text: type === "image" ? "📷 Sent an image" : text,
-        ts: Date.now(),
-      });
+  io.to(recipientSocketId).emit("notification", {
+  from,
+  text: type === "image" ? "📷 Sent an image" : text,
+  ts: Date.now(),
+});
+
     }
   });
 
@@ -223,4 +236,4 @@ app.get("/history/:u1/:u2", authenticateToken, async (req, res) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () =>
   console.log(`Server running → http://localhost:${PORT}`)
-);
+);  
